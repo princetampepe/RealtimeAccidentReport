@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: accident-reporting-api
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+  h2:
+    console:
+      enabled: true
+  datasource:
+    url: jdbc:h2:mem:testdb
+    driverClassName: org.h2.Driver
+    username: sa
+    password:
+
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+logging:
+  level:
+    root: INFO
+    com.accidentreport: DEBUG
+
+firebase:
+  config:
+    database-url: YOUR_FIREBASE_REALTIME_DB_URL

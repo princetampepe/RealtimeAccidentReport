@@ -1,0 +1,27 @@
+# Node
+node_modules/
+npm-debug.log
+.env
+.env.local
+dist/
+
+# Maven
+target/
+*.jar
+*.class
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Firebase
+.firebase/
+.firebaserc
+
+# Logs
+*.log
+node_modules
