@@ -1,3 +1,4 @@
+// v1.0.0 - Real-time Accident Reporting System
 import { useEffect, useMemo, useState } from "react";
 import {
   createUserWithEmailAndPassword,
