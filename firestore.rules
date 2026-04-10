@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    match /users/{userId} {
+      allow read, create, update, delete: if isOwner(userId);
+    }
+
+    match /accidents/{reportId} {
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn()
+        && request.resource.data.reporterId == request.auth.uid
+        && request.resource.data.reporterEmail == request.auth.token.email
+        && request.resource.data.dispatchId is string
+        && request.resource.data.title is string
+        && request.resource.data.description is string
+        && request.resource.data.latitude is number
+        && request.resource.data.longitude is number
+        && request.resource.data.severity in ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+        && request.resource.data.status in ['ACTIVE', 'RESOLVED']
+        && request.resource.data.responseCount is int;
+
+      allow update: if isSignedIn()
+        && resource.data.reporterId == request.auth.uid
+        && request.resource.data.reporterId == resource.data.reporterId
+        && request.resource.data.dispatchId == resource.data.dispatchId
+        && request.resource.data.reporterEmail == resource.data.reporterEmail;
+
+      allow delete: if isSignedIn() && resource.data.reporterId == request.auth.uid;
+    }
+  }
+}
