@@ -468,6 +468,13 @@ button:disabled {
   background: #000;
 }
 
+.camera-wait {
+  margin: 0;
+  padding: 0.5rem 0.65rem 0;
+  color: var(--text-soft);
+  font-size: 0.82rem;
+}
+
 .camera-live-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -669,6 +669,7 @@ export default function App() {
   const [cameraOpen, setCameraOpen] = useState(false);
   const [cameraMode, setCameraMode] = useState("photo");
   const [cameraStarting, setCameraStarting] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
   const [cameraRecording, setCameraRecording] = useState(false);
   const [cameraError, setCameraError] = useState("");
 
@@ -1217,6 +1218,7 @@ export default function App() {
   async function openLiveCamera(mode) {
     setCameraError("");
     setCameraMode(mode);
+    setCameraReady(false);
 
     if (!navigator.mediaDevices?.getUserMedia) {
       setCameraError("Live camera is not supported by this browser. Falling back to file picker.");
@@ -1230,9 +1232,15 @@ export default function App() {
 
     setCameraStarting(true);
     try {
+      const isMobileDevice =
+        /Android|iPhone|iPad|iPod|Mobile|Silk/i.test(navigator.userAgent);
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: { ideal: "environment" },
+          facingMode: { ideal: isMobileDevice ? "environment" : "user" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30, max: 30 },
         },
         audio: mode === "video",
       });
@@ -1241,8 +1249,40 @@ export default function App() {
       setCameraOpen(true);
 
       if (liveVideoRef.current) {
-        liveVideoRef.current.srcObject = stream;
-        await liveVideoRef.current.play().catch(() => {});
+        const video = liveVideoRef.current;
+        video.srcObject = stream;
+        video.muted = true;
+
+        const ready = await new Promise((resolve) => {
+          let resolved = false;
+
+          const complete = (value) => {
+            if (resolved) return;
+            resolved = true;
+            video.removeEventListener("loadedmetadata", onReady);
+            video.removeEventListener("canplay", onReady);
+            resolve(value);
+          };
+
+          const onReady = () => complete(true);
+          video.addEventListener("loadedmetadata", onReady, { once: true });
+          video.addEventListener("canplay", onReady, { once: true });
+
+          video
+            .play()
+            .then(() => complete(true))
+            .catch(() => {
+              // Some browsers still need explicit user interaction before play resolves.
+            });
+
+          setTimeout(() => complete(video.videoWidth > 0 && video.videoHeight > 0), 4500);
+        });
+
+        if (!ready) {
+          setCameraError("Camera stream is warming up. Try capture again in a second.");
+        }
+
+        setCameraReady(true);
       }
     } catch {
       setCameraError("Camera access failed. Allow camera permission and try again.");
@@ -1262,6 +1302,7 @@ export default function App() {
     }
 
     setCameraRecording(false);
+    setCameraReady(false);
     setCameraOpen(false);
     stopCameraTracks();
     recordedChunksRef.current = [];
@@ -1861,12 +1902,13 @@ export default function App() {
               {cameraOpen && (
                 <div className="camera-live-panel">
                   <video ref={liveVideoRef} autoPlay playsInline muted className="camera-live-preview" />
+                  {!cameraReady && <p className="camera-wait">Starting camera stream...</p>}
                   <div className="camera-live-actions">
                     {cameraMode === "photo" ? (
                       <button
                         type="button"
                         onClick={capturePhotoFromLiveCamera}
-                        disabled={instantUploadBusy}
+                        disabled={instantUploadBusy || !cameraReady}
                       >
                         Capture Photo
                       </button>
@@ -1874,7 +1916,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={cameraRecording ? stopVideoRecording : startVideoRecording}
-                        disabled={instantUploadBusy}
+                        disabled={instantUploadBusy || !cameraReady}
                       >
                         {cameraRecording ? "Stop Recording" : "Start Recording"}
                       </button>
