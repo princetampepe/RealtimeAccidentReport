@@ -374,6 +374,26 @@ function getLocationSourceLabel(source) {
   return "Unknown";
 }
 
+function getAccuracyBucket(accuracyMeters) {
+  const accuracy = Number(accuracyMeters);
+  if (!Number.isFinite(accuracy) || accuracy <= 0) {
+    return { label: "Unknown", tone: "unknown" };
+  }
+  if (accuracy <= 20) {
+    return { label: "Precise", tone: "precise" };
+  }
+  if (accuracy <= 75) {
+    return { label: "Good", tone: "good" };
+  }
+  return { label: "Approx", tone: "approx" };
+}
+
+function formatCoordinates(latitude, longitude) {
+  const normalized = normalizeCoordinates(latitude, longitude);
+  if (!normalized) return "-";
+  return `${normalized.lat}, ${normalized.lng}`;
+}
+
 async function reverseGeocodeCoordinates(latitude, longitude) {
   const normalized = normalizeCoordinates(latitude, longitude);
   if (!normalized) return "";
@@ -2156,49 +2176,77 @@ export default function App() {
               <p className="empty-state">No incidents yet. Create your first report.</p>
             )}
 
-            {visibleAccidents.map((item) => (
+            {visibleAccidents.map((item) => {
+              const accuracyInfo = getAccuracyBucket(item.locationAccuracyMeters);
+
+              return (
               <article key={item.id} className="incident-card">
                 <div className="incident-top">
-                  <h4>{item.title}</h4>
+                  <h4>{item.title || "Untitled Incident"}</h4>
                   <div className="incident-labels">
                     <span className={`badge ${item.severity?.toLowerCase()}`}>
                       {item.severity || "UNKNOWN"}
                     </span>
+                    {Number.isFinite(Number(item.locationAccuracyMeters)) && (
+                      <span className={`accuracy-pill ${accuracyInfo.tone}`}>
+                        {accuracyInfo.label} Pin
+                      </span>
+                    )}
                     {item.locationSource && (
                       <span className="source-pill">{getLocationSourceLabel(item.locationSource)}</span>
                     )}
                   </div>
                 </div>
-                <p>{item.description}</p>
-                <p className="incident-address">{item.address || "Address unavailable"}</p>
+                <p className="incident-description">{item.description}</p>
+
+                <div className="incident-location-row">
+                  <p className="incident-address">{item.address || "Address unavailable"}</p>
+                  {getGoogleMapsLink(item.latitude, item.longitude) && (
+                    <a
+                      className="map-open-link compact"
+                      href={item.googleMapsUrl || getGoogleMapsLink(item.latitude, item.longitude)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open map
+                    </a>
+                  )}
+                </div>
 
                 <IncidentMiniMap latitude={item.latitude} longitude={item.longitude} />
 
-                <ul>
-                  <li>Status: {item.status || "-"}</li>
-                  <li>Reporter: {item.reporterId || "-"}</li>
-                  <li>
-                    Location: {item.address || "Address unavailable"}{" "}
-                    {getGoogleMapsLink(item.latitude, item.longitude) && (
-                      <a
-                        href={item.googleMapsUrl || getGoogleMapsLink(item.latitude, item.longitude)}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Open map
-                      </a>
-                    )}
-                  </li>
-                  <li>Coordinates: {item.latitude}, {item.longitude}</li>
-                  <li>Impact Radius: {item.incidentRadiusMeters ? `${item.incidentRadiusMeters} m` : "-"}</li>
-                  <li>Pin Accuracy: {item.locationAccuracyMeters ? `±${item.locationAccuracyMeters} m` : "-"}</li>
+                <div className="incident-metrics-grid">
+                  <div className="metric-tile">
+                    <span>Status</span>
+                    <strong>{item.status || "-"}</strong>
+                  </div>
+                  <div className="metric-tile">
+                    <span>Reporter</span>
+                    <strong>{item.reporterId || "-"}</strong>
+                  </div>
+                  <div className="metric-tile">
+                    <span>Coordinates</span>
+                    <strong>{formatCoordinates(item.latitude, item.longitude)}</strong>
+                  </div>
+                  <div className="metric-tile">
+                    <span>Impact Radius</span>
+                    <strong>{item.incidentRadiusMeters ? `${item.incidentRadiusMeters} m` : "-"}</strong>
+                  </div>
+                  <div className="metric-tile">
+                    <span>Pin Accuracy</span>
+                    <strong>{item.locationAccuracyMeters ? `±${item.locationAccuracyMeters} m` : "-"}</strong>
+                  </div>
+                  <div className="metric-tile">
+                    <span>Reported</span>
+                    <strong>{formatDate(item.reportedAt)}</strong>
+                  </div>
                   {item.distanceKm != null && (
-                    <li>
-                      Distance: {item.distanceKm.toFixed(2)} km | Estimated responder ETA: {item.etaMinutes} min
-                    </li>
+                    <div className="metric-tile metric-tile-emphasis">
+                      <span>Dispatch</span>
+                      <strong>{item.distanceKm.toFixed(2)} km · ETA {item.etaMinutes} min</strong>
+                    </div>
                   )}
-                  <li>Reported: {formatDate(item.reportedAt)}</li>
-                </ul>
+                </div>
 
                 {Array.isArray(item.mediaAttachments) && item.mediaAttachments.length > 0 && (
                   <div className="media-grid">
@@ -2247,7 +2295,8 @@ export default function App() {
                   </button>
                 </div>
               </article>
-            ))}
+            );
+            })}
           </div>
         </section>
       </main>
