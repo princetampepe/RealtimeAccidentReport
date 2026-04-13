@@ -378,6 +378,49 @@ async function reverseGeocodeCoordinates(latitude, longitude) {
   const normalized = normalizeCoordinates(latitude, longitude);
   if (!normalized) return "";
 
+  try {
+    const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${normalized.lat}&lon=${normalized.lng}&zoom=18&addressdetails=1`;
+    const nominatimResponse = await fetch(nominatimUrl, {
+      headers: {
+        "Accept-Language": "en",
+      },
+    });
+
+    if (nominatimResponse.ok) {
+      const nominatimData = await nominatimResponse.json();
+      const address = nominatimData?.address || {};
+
+      const roadLine = [address.house_number, address.road]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+
+      const values = [
+        address.attraction,
+        address.building,
+        roadLine,
+        address.neighbourhood,
+        address.suburb,
+        address.city || address.town || address.village || address.municipality,
+        address.state,
+        address.country,
+      ];
+
+      const uniqueParts = values.filter((part, index) => part && values.indexOf(part) === index);
+      const preciseAddress = uniqueParts.join(", ");
+
+      if (preciseAddress) {
+        return preciseAddress;
+      }
+
+      if (nominatimData?.display_name) {
+        return String(nominatimData.display_name);
+      }
+    }
+  } catch {
+    // Fall back to a secondary reverse geocoder.
+  }
+
   const endpoint = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${normalized.lat}&longitude=${normalized.lng}&localityLanguage=en`;
   const response = await fetch(endpoint);
 
@@ -1110,7 +1153,7 @@ export default function App() {
 
       if (nextAddress) {
         setForm((prev) => ({ ...prev, address: nextAddress }));
-        setAddressHint("Address auto-filled from selected map point.");
+        setAddressHint("Address auto-filled with street-level details.");
       } else {
         setAddressHint("Coordinates saved. Address lookup returned no result.");
       }
@@ -2135,7 +2178,7 @@ export default function App() {
                   <li>Status: {item.status || "-"}</li>
                   <li>Reporter: {item.reporterId || "-"}</li>
                   <li>
-                    Location: {item.latitude}, {item.longitude}{" "}
+                    Location: {item.address || "Address unavailable"}{" "}
                     {getGoogleMapsLink(item.latitude, item.longitude) && (
                       <a
                         href={item.googleMapsUrl || getGoogleMapsLink(item.latitude, item.longitude)}
@@ -2146,6 +2189,7 @@ export default function App() {
                       </a>
                     )}
                   </li>
+                  <li>Coordinates: {item.latitude}, {item.longitude}</li>
                   <li>Impact Radius: {item.incidentRadiusMeters ? `${item.incidentRadiusMeters} m` : "-"}</li>
                   <li>Pin Accuracy: {item.locationAccuracyMeters ? `±${item.locationAccuracyMeters} m` : "-"}</li>
                   {item.distanceKm != null && (
