@@ -52,6 +52,7 @@ const UPLOAD_MAX_ATTEMPTS = 3;
 const DUPLICATE_RADIUS_KM = 0.6;
 const DUPLICATE_WINDOW_HOURS = 6;
 const ETA_SPEED_KMPH = 35;
+const FEED_ITEMS_PER_PAGE = 8;
 const CLOUDINARY_CLOUD_NAME_FALLBACK =
   import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || "";
 const CLOUDINARY_API_KEY_FALLBACK =
@@ -61,6 +62,20 @@ const CLOUDINARY_SIGNATURE_ENDPOINT =
   "/api/cloudinary-signature";
 const CLOUDINARY_IMAGE_FOLDER =
   import.meta.env.VITE_CLOUDINARY_IMAGE_FOLDER || "accidents/images";
+const RESOLUTION_CONFIRMATIONS_REQUIRED = 2;
+const RESOLUTION_NOTE_MIN_LENGTH = 12;
+
+function getPageFromHash(hashValue) {
+  const normalized = String(hashValue || "")
+    .replace("#", "")
+    .toLowerCase()
+    .trim();
+
+  if (["report", "feed", "profile"].includes(normalized)) {
+    return normalized;
+  }
+  return "feed";
+}
 
 function wait(ms) {
   return new Promise((resolve) => {
@@ -692,10 +707,14 @@ export default function App() {
   const [form, setForm] = useState(initialForm);
   const [filter, setFilter] = useState("ALL");
   const [sortMode, setSortMode] = useState("NEWEST");
+  const [feedPage, setFeedPage] = useState(1);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [authMode, setAuthMode] = useState("login");
+  const [activePage, setActivePage] = useState(() =>
+    typeof window === "undefined" ? "feed" : getPageFromHash(window.location.hash)
+  );
   const [user, setUser] = useState(null);
   const [dispatchId, setDispatchId] = useState(null);
   const [authReady, setAuthReady] = useState(false);
@@ -786,6 +805,15 @@ export default function App() {
     return next;
   }, [accidentsWithMeta, filter, sortMode, operatorLocation]);
 
+  const totalFeedPages = useMemo(() => {
+    return Math.max(1, Math.ceil(visibleAccidents.length / FEED_ITEMS_PER_PAGE));
+  }, [visibleAccidents.length]);
+
+  const pagedVisibleAccidents = useMemo(() => {
+    const startIndex = (feedPage - 1) * FEED_ITEMS_PER_PAGE;
+    return visibleAccidents.slice(startIndex, startIndex + FEED_ITEMS_PER_PAGE);
+  }, [visibleAccidents, feedPage]);
+
   const duplicateCandidates = useMemo(() => {
     if (!selectedPosition) return [];
 
@@ -851,6 +879,31 @@ export default function App() {
     }
   }, [duplicateCandidates.length]);
 
+  useEffect(() => {
+    setFeedPage(1);
+  }, [filter, sortMode, operatorLocation]);
+
+  useEffect(() => {
+    setFeedPage((prev) => Math.min(prev, totalFeedPages));
+  }, [totalFeedPages]);
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      setActivePage(getPageFromHash(window.location.hash));
+    };
+
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, []);
+
+  function navigateToPage(page) {
+    const nextPage = getPageFromHash(page);
+    setActivePage(nextPage);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", `#${nextPage}`);
+    }
+  }
+
   const stats = useMemo(() => {
     const total = accidents.length;
     const active = accidents.filter((item) => item.status === "ACTIVE").length;
@@ -858,6 +911,20 @@ export default function App() {
     const high = accidents.filter((item) => item.severity === "HIGH").length;
     return { total, active, critical, high };
   }, [accidents]);
+
+  const profileStats = useMemo(() => {
+    const mine = accidents.filter((item) => item.reporterId === user?.uid);
+    const pending = mine.filter((item) => item.status === "RESOLUTION_PENDING").length;
+    const resolved = mine.filter((item) => item.status === "RESOLVED").length;
+    const active = mine.filter((item) => item.status === "ACTIVE").length;
+
+    return {
+      totalMine: mine.length,
+      active,
+      pending,
+      resolved,
+    };
+  }, [accidents, user]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
@@ -1590,11 +1657,105 @@ export default function App() {
     setUploadedMedia((prev) => prev.filter((_, currentIndex) => currentIndex !== index));
   }
 
-  async function markResolved(item) {
+  async function requestResolution(item) {
+    setError("");
+
+    if (!user) {
+      setError("Please sign in first.");
+      return;
+    }
+
+    if (item.reporterId !== user.uid) {
+      setError("Only the original reporter can request resolution.");
+      return;
+    }
+
+    if (item.status !== "ACTIVE") {
+      setError("Only active incidents can be moved to resolution review.");
+      return;
+    }
+
+    const noteInput = window.prompt(
+      "Describe why this incident is resolved (minimum 12 characters)."
+    );
+
+    if (noteInput == null) {
+      return;
+    }
+
+    const note = noteInput.trim();
+    if (note.length < RESOLUTION_NOTE_MIN_LENGTH) {
+      setError(`Resolution note must be at least ${RESOLUTION_NOTE_MIN_LENGTH} characters.`);
+      return;
+    }
+
     setError("");
     try {
       await updateDoc(doc(db, "accidents", item.id), {
-        status: "RESOLVED",
+        status: "RESOLUTION_PENDING",
+        resolution: {
+          note,
+          requestedBy: user.uid,
+          requestedByEmail: user.email || "",
+          requestedAt: serverTimestamp(),
+          confirmedBy: [user.uid],
+          confirmationCount: 1,
+          confirmationsRequired: RESOLUTION_CONFIRMATIONS_REQUIRED,
+          finalizedBy: null,
+          finalizedByEmail: null,
+          finalizedAt: null,
+        },
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      setError(getFirestoreErrorMessage(err));
+    }
+  }
+
+  async function confirmResolution(item) {
+    setError("");
+
+    if (!user) {
+      setError("Please sign in first.");
+      return;
+    }
+
+    if (item.status !== "RESOLUTION_PENDING") {
+      setError("This incident is not waiting for resolution confirmation.");
+      return;
+    }
+
+    if (item.reporterId === user.uid) {
+      setError("Another dispatcher must verify this resolution request.");
+      return;
+    }
+
+    const currentResolution = item.resolution || {};
+    const confirmedBy = Array.isArray(currentResolution.confirmedBy)
+      ? currentResolution.confirmedBy
+      : [];
+
+    if (confirmedBy.includes(user.uid)) {
+      setError("You already confirmed this incident.");
+      return;
+    }
+
+    const nextConfirmedBy = [...confirmedBy, user.uid];
+    const requiredConfirmations = Number(currentResolution.confirmationsRequired) > 0
+      ? Number(currentResolution.confirmationsRequired)
+      : RESOLUTION_CONFIRMATIONS_REQUIRED;
+    const shouldResolve = nextConfirmedBy.length >= requiredConfirmations;
+
+    try {
+      await updateDoc(doc(db, "accidents", item.id), {
+        status: shouldResolve ? "RESOLVED" : "RESOLUTION_PENDING",
+        "resolution.confirmedBy": nextConfirmedBy,
+        "resolution.confirmationCount": nextConfirmedBy.length,
+        "resolution.confirmationsRequired": requiredConfirmations,
+        "resolution.lastConfirmedAt": serverTimestamp(),
+        "resolution.finalizedBy": shouldResolve ? user.uid : null,
+        "resolution.finalizedByEmail": shouldResolve ? user.email || "" : null,
+        "resolution.finalizedAt": shouldResolve ? serverTimestamp() : null,
         updatedAt: serverTimestamp(),
       });
     } catch (err) {
@@ -1737,6 +1898,34 @@ export default function App() {
         <button type="button" onClick={handleLogout}>Log Out</button>
       </section>
 
+      <section className="panel page-nav-panel">
+        <div className="page-nav" role="tablist" aria-label="Dashboard sections">
+          <button
+            type="button"
+            className={`nav-tab ${activePage === "report" ? "active" : ""}`}
+            onClick={() => navigateToPage("report")}
+          >
+            Report
+          </button>
+          <button
+            type="button"
+            className={`nav-tab ${activePage === "feed" ? "active" : ""}`}
+            onClick={() => navigateToPage("feed")}
+          >
+            Live Feed
+          </button>
+          <button
+            type="button"
+            className={`nav-tab ${activePage === "profile" ? "active" : ""}`}
+            onClick={() => navigateToPage("profile")}
+          >
+            Profile
+          </button>
+        </div>
+      </section>
+
+      {error && <p className="error-box global-error">{error}</p>}
+
       <section className="stats-grid">
         <article className="stat-card">
           <h2>Total Reports</h2>
@@ -1756,7 +1945,8 @@ export default function App() {
         </article>
       </section>
 
-      <main className="layout-grid">
+      <main className="single-page-main">
+        {activePage === "report" && (
         <section className="panel">
           <h3>Report New Accident</h3>
           <form onSubmit={handleSubmit} className="report-form">
@@ -2136,7 +2326,9 @@ export default function App() {
             </button>
           </form>
         </section>
+        )}
 
+        {activePage === "feed" && (
         <section className="panel">
           <div className="panel-header">
             <h3>Live Accident Feed</h3>
@@ -2169,15 +2361,35 @@ export default function App() {
             </p>
           )}
 
-          {error && <p className="error-box">{error}</p>}
-
           <div className="feed-list">
             {!loading && user && visibleAccidents.length === 0 && (
               <p className="empty-state">No incidents yet. Create your first report.</p>
             )}
 
-            {visibleAccidents.map((item) => {
+            {pagedVisibleAccidents.map((item) => {
               const accuracyInfo = getAccuracyBucket(item.locationAccuracyMeters);
+              const resolution = item.resolution || {};
+              const confirmedBy = Array.isArray(resolution.confirmedBy)
+                ? resolution.confirmedBy
+                : [];
+              const requiredConfirmations = Number(resolution.confirmationsRequired) > 0
+                ? Number(resolution.confirmationsRequired)
+                : RESOLUTION_CONFIRMATIONS_REQUIRED;
+              const confirmationCount = Math.max(
+                Number(resolution.confirmationCount) || 0,
+                confirmedBy.length
+              );
+              const alreadyConfirmed = Boolean(user?.uid && confirmedBy.includes(user.uid));
+              const canConfirmResolution =
+                item.status === "RESOLUTION_PENDING" &&
+                Boolean(user?.uid) &&
+                user.uid !== item.reporterId &&
+                !alreadyConfirmed;
+              const statusTone = item.status === "RESOLVED"
+                ? "resolved"
+                : item.status === "RESOLUTION_PENDING"
+                  ? "pending"
+                  : "active";
 
               return (
               <article key={item.id} className="incident-card">
@@ -2186,6 +2398,9 @@ export default function App() {
                   <div className="incident-labels">
                     <span className={`badge ${item.severity?.toLowerCase()}`}>
                       {item.severity || "UNKNOWN"}
+                    </span>
+                    <span className={`status-pill ${statusTone}`}>
+                      {item.status || "UNKNOWN"}
                     </span>
                     {Number.isFinite(Number(item.locationAccuracyMeters)) && (
                       <span className={`accuracy-pill ${accuracyInfo.tone}`}>
@@ -2219,6 +2434,16 @@ export default function App() {
                   <div className="metric-tile">
                     <span>Status</span>
                     <strong>{item.status || "-"}</strong>
+                    {item.status === "RESOLUTION_PENDING" && (
+                      <small className="metric-note">
+                        {confirmationCount}/{requiredConfirmations} dispatcher confirmations
+                      </small>
+                    )}
+                    {item.status === "RESOLVED" && resolution.finalizedAt && (
+                      <small className="metric-note">
+                        Verified {formatDate(resolution.finalizedAt)}
+                      </small>
+                    )}
                   </div>
                   <div className="metric-tile">
                     <span>Reporter</span>
@@ -2240,6 +2465,12 @@ export default function App() {
                     <span>Reported</span>
                     <strong>{formatDate(item.reportedAt)}</strong>
                   </div>
+                  {(item.status === "RESOLUTION_PENDING" || item.status === "RESOLVED") && resolution.note && (
+                    <div className="metric-tile metric-tile-emphasis">
+                      <span>Resolution Note</span>
+                      <strong>{resolution.note}</strong>
+                    </div>
+                  )}
                   {item.distanceKm != null && (
                     <div className="metric-tile metric-tile-emphasis">
                       <span>Dispatch</span>
@@ -2279,17 +2510,48 @@ export default function App() {
                 )}
 
                 <div className="incident-actions">
-                  <button
-                    type="button"
-                    onClick={() => markResolved(item)}
-                    disabled={item.status === "RESOLVED"}
-                  >
-                    Mark Resolved
-                  </button>
+                  {item.status === "ACTIVE" && (
+                    <button
+                      type="button"
+                      onClick={() => requestResolution(item)}
+                      disabled={item.reporterId !== user?.uid}
+                    >
+                      {item.reporterId === user?.uid
+                        ? "Request Resolution"
+                        : "Reporter Only"}
+                    </button>
+                  )}
+
+                  {item.status === "RESOLUTION_PENDING" && (
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => confirmResolution(item)}
+                      disabled={!canConfirmResolution}
+                    >
+                      {alreadyConfirmed
+                        ? "Already Confirmed"
+                        : user?.uid === item.reporterId
+                          ? "Awaiting Other Dispatcher"
+                          : "Confirm Resolution"}
+                    </button>
+                  )}
+
+                  {item.status === "RESOLVED" && (
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled
+                    >
+                      Resolved Verified
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     className="danger"
                     onClick={() => removeAccident(item.id)}
+                    disabled={item.reporterId !== user?.uid}
                   >
                     Delete
                   </button>
@@ -2298,7 +2560,66 @@ export default function App() {
             );
             })}
           </div>
+
+          {visibleAccidents.length > FEED_ITEMS_PER_PAGE && (
+            <div className="pagination-row">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setFeedPage((prev) => Math.max(1, prev - 1))}
+                disabled={feedPage <= 1}
+              >
+                Previous
+              </button>
+
+              <p className="pagination-info">
+                Page {feedPage} of {totalFeedPages} |
+                Showing {Math.min((feedPage - 1) * FEED_ITEMS_PER_PAGE + 1, visibleAccidents.length)}-
+                {Math.min(feedPage * FEED_ITEMS_PER_PAGE, visibleAccidents.length)} of {visibleAccidents.length}
+              </p>
+
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setFeedPage((prev) => Math.min(totalFeedPages, prev + 1))}
+                disabled={feedPage >= totalFeedPages}
+              >
+                Next
+              </button>
+            </div>
+          )}
         </section>
+        )}
+
+        {activePage === "profile" && (
+        <section className="panel profile-page">
+          <h3>Dispatcher Profile</h3>
+          <div className="profile-grid">
+            <article className="profile-card">
+              <h4>Account</h4>
+              <p><strong>Email:</strong> {user.email || "-"}</p>
+              <p><strong>Dispatch ID:</strong> {dispatchId || "-"}</p>
+            </article>
+
+            <article className="profile-card">
+              <h4>My Reports</h4>
+              <p><strong>Total:</strong> {profileStats.totalMine}</p>
+              <p><strong>Active:</strong> {profileStats.active}</p>
+              <p><strong>Pending Resolution:</strong> {profileStats.pending}</p>
+              <p><strong>Resolved:</strong> {profileStats.resolved}</p>
+            </article>
+
+            <article className="profile-card policy-card">
+              <h4>Resolution Policy</h4>
+              <ul className="profile-list">
+                <li>Reporter submits a resolution request with a closure note.</li>
+                <li>A different dispatcher must confirm the request.</li>
+                <li>Incident becomes RESOLVED only after the second confirmation.</li>
+              </ul>
+            </article>
+          </div>
+        </section>
+        )}
       </main>
     </div>
   );

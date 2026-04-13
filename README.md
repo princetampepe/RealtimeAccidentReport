@@ -13,6 +13,9 @@ A modern full-stack application for real-time accident reporting with dispatch m
 - 🔴 **Severity Levels** - LOW, MEDIUM, HIGH, CRITICAL classification
 - 🖼️ **Cloudinary Images** - Incident photos uploaded to Cloudinary with retry support
 - 📷 **Camera Auto Upload** - Capture from camera and auto-attach media before submit
+- ✅ **Strict API Validation** - Server-side constraints for payload shape, geo ranges, enums, and media fields
+- 🔒 **Protected Write Endpoints** - Token-authenticated POST/PUT/DELETE with owner/admin authorization checks
+- 🧱 **Abuse Guardrails** - Built-in idempotency, duplicate detection, and per-actor rate limiting
 
 ## Tech Stack
 
@@ -90,6 +93,44 @@ mvn spring-boot:run
 ```
 
 Backend runs on http://localhost:8080
+
+## Production Backend Hardening
+
+The backend now includes these protections by default:
+
+- Request DTO validation (`@Valid`) with consistent JSON error responses
+- Unknown JSON field rejection (`fail-on-unknown-properties=true`)
+- Stateless auth filter for Firebase bearer tokens
+- Owner/admin authorization for update and delete
+- In-memory request rate limiting for write routes
+- Idempotency-key support for safe retry of report creation
+- Duplicate incident guard (distance + time + title similarity)
+
+### Security Configuration
+
+In `backend/src/main/resources/application.yml`:
+
+```yaml
+firebase:
+  enabled: false # set true in production when Firebase Admin credentials are configured
+
+app:
+  security:
+    require-auth: true
+```
+
+For production, set `firebase.enabled=true` and provide Google application credentials for Firebase Admin SDK.
+If you disable `require-auth`, write endpoints can be used without authentication (development only).
+
+### Write Endpoint Requirements
+
+- `Authorization: Bearer <firebase-id-token>` when auth is enabled
+- Optional `Idempotency-Key` header on `POST /api/accidents`
+
+### Validation/Test Coverage Added
+
+- Service tests for defaults, idempotency, duplicate detection, and ownership checks
+- Controller tests for validation failures, unknown fields, and successful create requests
 
 ### Firebase Setup
 

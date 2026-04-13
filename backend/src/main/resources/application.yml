@@ -1,6 +1,9 @@
 spring:
   application:
     name: accident-reporting-api
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
   jpa:
     hibernate:
       ddl-auto: update
@@ -25,8 +28,17 @@ server:
 logging:
   level:
     root: INFO
-    com.accidentreport: DEBUG
+    com.accidentreport: INFO
 
 firebase:
+  enabled: false
   config:
     database-url: YOUR_FIREBASE_REALTIME_DB_URL
+
+app:
+  security:
+    require-auth: true
+  cors:
+    allowed-origins:
+      - http://localhost:3000
+      - http://localhost:5173

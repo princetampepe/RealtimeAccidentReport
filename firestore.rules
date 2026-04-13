@@ -14,6 +14,49 @@ service cloud.firestore {
     }
 
     match /accidents/{reportId} {
+      function reporterIdentityUnchanged() {
+        return request.resource.data.reporterId == resource.data.reporterId
+          && request.resource.data.dispatchId == resource.data.dispatchId
+          && request.resource.data.reporterEmail == resource.data.reporterEmail;
+      }
+
+      function ownerCanUpdateAccident() {
+        return resource.data.reporterId == request.auth.uid
+          && reporterIdentityUnchanged()
+          && (
+            (resource.data.status == 'ACTIVE' && request.resource.data.status in ['ACTIVE', 'RESOLUTION_PENDING'])
+            || (resource.data.status == 'RESOLUTION_PENDING' && request.resource.data.status in ['RESOLUTION_PENDING', 'ACTIVE'])
+            || (resource.data.status == 'RESOLVED' && request.resource.data.status in ['RESOLVED', 'ACTIVE'])
+          )
+          && (
+            request.resource.data.status != 'RESOLUTION_PENDING'
+            || (
+              request.resource.data.resolution is map
+              && request.resource.data.resolution.note is string
+              && request.resource.data.resolution.note.size() >= 12
+              && request.resource.data.resolution.confirmedBy is list
+              && request.auth.uid in request.resource.data.resolution.confirmedBy
+            )
+          );
+      }
+
+      function canConfirmResolutionAsSecondDispatcher() {
+        return resource.data.status == 'RESOLUTION_PENDING'
+          && request.resource.data.status in ['RESOLUTION_PENDING', 'RESOLVED']
+          && request.auth.uid != resource.data.reporterId
+          && reporterIdentityUnchanged()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolution', 'updatedAt'])
+          && resource.data.resolution is map
+          && request.resource.data.resolution is map
+          && resource.data.resolution.confirmedBy is list
+          && request.resource.data.resolution.confirmedBy is list
+          && request.resource.data.resolution.confirmedBy.hasAll(resource.data.resolution.confirmedBy)
+          && request.auth.uid in request.resource.data.resolution.confirmedBy
+          && !(request.auth.uid in resource.data.resolution.confirmedBy)
+          && request.resource.data.resolution.confirmedBy.size() == resource.data.resolution.confirmedBy.size() + 1
+          && (request.resource.data.status != 'RESOLVED' || request.resource.data.resolution.confirmedBy.size() >= 2);
+      }
+
       allow read: if isSignedIn();
 
       allow create: if isSignedIn()
@@ -25,14 +68,11 @@ service cloud.firestore {
         && request.resource.data.latitude is number
         && request.resource.data.longitude is number
         && request.resource.data.severity in ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
-        && request.resource.data.status in ['ACTIVE', 'RESOLVED']
+        && request.resource.data.status == 'ACTIVE'
         && request.resource.data.responseCount is int;
 
       allow update: if isSignedIn()
-        && resource.data.reporterId == request.auth.uid
-        && request.resource.data.reporterId == resource.data.reporterId
-        && request.resource.data.dispatchId == resource.data.dispatchId
-        && request.resource.data.reporterEmail == resource.data.reporterEmail;
+        && (ownerCanUpdateAccident() || canConfirmResolutionAsSecondDispatcher());
 
       allow delete: if isSignedIn() && resource.data.reporterId == request.auth.uid;
     }
