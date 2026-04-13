@@ -52,6 +52,15 @@ const UPLOAD_MAX_ATTEMPTS = 3;
 const DUPLICATE_RADIUS_KM = 0.6;
 const DUPLICATE_WINDOW_HOURS = 6;
 const ETA_SPEED_KMPH = 35;
+const CLOUDINARY_CLOUD_NAME_FALLBACK =
+  import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || "";
+const CLOUDINARY_API_KEY_FALLBACK =
+  import.meta.env.VITE_CLOUDINARY_API_KEY || "";
+const CLOUDINARY_SIGNATURE_ENDPOINT =
+  import.meta.env.VITE_CLOUDINARY_SIGNATURE_ENDPOINT ||
+  "/api/cloudinary-signature";
+const CLOUDINARY_IMAGE_FOLDER =
+  import.meta.env.VITE_CLOUDINARY_IMAGE_FOLDER || "accidents/images";
 
 function wait(ms) {
   return new Promise((resolve) => {
@@ -67,8 +76,179 @@ function isRetriableStorageError(code) {
   );
 }
 
+function isRetriableCloudinaryStatus(status) {
+  return status === 0 || status === 408 || status === 429 || status >= 500;
+}
+
 function buildMediaFileKey(file, index) {
   return `${index}:${file.name}:${file.size}`;
+}
+
+async function fetchCloudinarySignedParams({ folder, publicId }) {
+  const response = await fetch(CLOUDINARY_SIGNATURE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folder, publicId }),
+  });
+
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
+  }
+
+  if (!response.ok) {
+    const error = new Error(
+      payload?.error ||
+        payload?.message ||
+        "Failed to obtain Cloudinary upload signature."
+    );
+    error.code = "cloudinary/signature-failed";
+    error.status = response.status;
+    throw error;
+  }
+
+  const cloudName = payload?.cloudName || CLOUDINARY_CLOUD_NAME_FALLBACK;
+  const apiKey = payload?.apiKey || CLOUDINARY_API_KEY_FALLBACK;
+  const timestamp = Number(payload?.timestamp);
+  const signature = payload?.signature || "";
+
+  if (!cloudName || !apiKey || !signature || !Number.isFinite(timestamp)) {
+    const error = new Error(
+      "Cloudinary signature endpoint returned incomplete upload credentials."
+    );
+    error.code = "cloudinary/not-configured";
+    error.status = 500;
+    throw error;
+  }
+
+  return {
+    cloudName,
+    apiKey,
+    signature,
+    timestamp,
+    folder: payload?.folder || folder || "",
+    publicId: payload?.publicId || publicId || "",
+  };
+}
+
+function uploadImageToCloudinaryOnce({ file, signedUpload, onProgress }) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      "POST",
+      `https://api.cloudinary.com/v1_1/${signedUpload.cloudName}/image/upload`
+    );
+    xhr.timeout = 60000;
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.round((event.loaded / event.total) * 100);
+      onProgress?.(percent);
+    };
+
+    xhr.onerror = () => {
+      const error = new Error("Network error during Cloudinary upload.");
+      error.code = "cloudinary/network-error";
+      error.status = 0;
+      reject(error);
+    };
+
+    xhr.ontimeout = () => {
+      const error = new Error("Cloudinary upload timed out.");
+      error.code = "cloudinary/timeout";
+      error.status = 0;
+      reject(error);
+    };
+
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState !== 4) return;
+
+      let body = {};
+      try {
+        body = JSON.parse(xhr.responseText || "{}");
+      } catch {
+        body = {};
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300 && body.secure_url) {
+        resolve({
+          secureUrl: body.secure_url,
+          publicId: body.public_id || null,
+          assetId: body.asset_id || null,
+        });
+        return;
+      }
+
+      const error = new Error(
+        body?.error?.message || "Cloudinary image upload failed."
+      );
+      error.code = "cloudinary/upload-failed";
+      error.status = xhr.status;
+      reject(error);
+    };
+
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("api_key", signedUpload.apiKey);
+    formData.append("timestamp", String(signedUpload.timestamp));
+    formData.append("signature", signedUpload.signature);
+    if (signedUpload.folder) {
+      formData.append("folder", signedUpload.folder);
+    }
+    if (signedUpload.publicId) {
+      formData.append("public_id", signedUpload.publicId);
+    }
+
+    xhr.send(formData);
+  });
+}
+
+async function uploadCloudinaryImageWithRetry({
+  file,
+  folder,
+  publicId,
+  maxAttempts = UPLOAD_MAX_ATTEMPTS,
+  onAttempt,
+  onProgress,
+}) {
+  let attempt = 0;
+
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    onAttempt?.(attempt, maxAttempts);
+
+    try {
+      const signedUpload = await fetchCloudinarySignedParams({
+        folder,
+        publicId,
+      });
+
+      const uploadResult = await uploadImageToCloudinaryOnce({
+        file,
+        signedUpload,
+        onProgress,
+      });
+
+      return { ...uploadResult, attemptsUsed: attempt };
+    } catch (err) {
+      const code = err?.code || "";
+      const status = Number(err?.status || 0);
+      if (
+        code === "cloudinary/not-configured" ||
+        attempt >= maxAttempts ||
+        !isRetriableCloudinaryStatus(status)
+      ) {
+        throw err;
+      }
+
+      const backoffMs = 700 * 2 ** (attempt - 1);
+      await wait(backoffMs);
+    }
+  }
+
+  throw new Error("Cloudinary upload failed after retries.");
 }
 
 async function uploadEvidenceFileWithRetry({
@@ -412,6 +592,34 @@ function getStorageErrorMessage(err) {
   }
 }
 
+function getCloudinaryErrorMessage(err) {
+  const code = err?.code || "";
+  const status = Number(err?.status || 0);
+
+  if (code === "cloudinary/not-configured") {
+    return "Cloudinary signed upload is not configured correctly. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in Vercel project settings.";
+  }
+  if (code === "cloudinary/signature-failed") {
+    return (
+      err?.message ||
+      "Could not obtain Cloudinary upload signature from the server."
+    );
+  }
+  if (status === 400) {
+    return err?.message || "Cloudinary rejected the upload request.";
+  }
+  if (status === 401 || status === 403) {
+    return "Cloudinary authorization failed. Verify API key/secret and signature endpoint.";
+  }
+  if (status === 429) {
+    return "Cloudinary rate limit reached. Please retry shortly.";
+  }
+  if (status >= 500) {
+    return "Cloudinary is temporarily unavailable. Please try again.";
+  }
+  return err?.message || "Cloudinary image upload failed.";
+}
+
 export default function App() {
   const [accidents, setAccidents] = useState([]);
   const [form, setForm] = useState(initialForm);
@@ -703,11 +911,47 @@ export default function App() {
         selectedFiles.map(async (file, index) => {
           const fileKey = buildMediaFileKey(file, index);
           const safeName = sanitizeFileName(file.name);
-          const path = `accidents/${accidentRef.id}/${uploadTimestamp}-${index}-${safeName}`;
 
           setUploadStatusMessage(
             `Uploading evidence ${index + 1}/${selectedFiles.length}`
           );
+
+          if (file.type.startsWith("image/")) {
+            const imagePublicId = `${accidentRef.id}-${uploadTimestamp}-${index}-${safeName.replace(/\.[^/.]+$/, "")}`;
+            const cloudinaryResult = await uploadCloudinaryImageWithRetry({
+              file,
+              folder: CLOUDINARY_IMAGE_FOLDER,
+              publicId: imagePublicId,
+              maxAttempts: UPLOAD_MAX_ATTEMPTS,
+              onAttempt: (attempt, max) => {
+                setUploadAttemptMap((prev) => ({
+                  ...prev,
+                  [fileKey]: { attempt, max },
+                }));
+              },
+              onProgress: (percent) => {
+                setUploadProgressMap((prev) => ({
+                  ...prev,
+                  [fileKey]: percent,
+                }));
+              },
+            });
+
+            return {
+              url: cloudinaryResult.secureUrl,
+              name: file.name,
+              storagePath: null,
+              cloudinaryPublicId: cloudinaryResult.publicId,
+              cloudinaryAssetId: cloudinaryResult.assetId,
+              provider: "cloudinary",
+              type: "image",
+              contentType: file.type || "",
+              size: file.size,
+              attemptsUsed: cloudinaryResult.attemptsUsed,
+            };
+          }
+
+          const path = `accidents/${accidentRef.id}/${uploadTimestamp}-${index}-${safeName}`;
 
           const { url, attemptsUsed } = await uploadEvidenceFileWithRetry({
             file,
@@ -731,6 +975,9 @@ export default function App() {
             url,
             name: file.name,
             storagePath: path,
+            cloudinaryPublicId: null,
+            cloudinaryAssetId: null,
+            provider: "firebase-storage",
             type: file.type.startsWith("video/") ? "video" : "image",
             contentType: file.type || "",
             size: file.size,
@@ -782,6 +1029,9 @@ export default function App() {
       if ((err?.code || "").startsWith("storage/")) {
         setError(getStorageErrorMessage(err));
         setUploadStatusMessage("Evidence upload failed. You can submit again to retry.");
+      } else if ((err?.code || "").startsWith("cloudinary/")) {
+        setError(getCloudinaryErrorMessage(err));
+        setUploadStatusMessage("Image upload failed. You can submit again to retry.");
       } else {
         setError(getFirestoreErrorMessage(err));
         setUploadStatusMessage("");
@@ -1298,7 +1548,7 @@ export default function App() {
 
               {selectedFiles.length > 0 && (
                 <p className="upload-policy-note">
-                  Automatic retry is enabled for temporary upload failures.
+                  Images upload to Cloudinary using server-signed requests, videos upload to Firebase Storage. Automatic retry is enabled for temporary failures.
                 </p>
               )}
 

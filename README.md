@@ -11,6 +11,7 @@ A modern full-stack application for real-time accident reporting with dispatch m
 - 📊 **Dashboard Analytics** - Real-time stats (total reports, active, critical)
 - 🗺️ **Geolocation Support** - Latitude/longitude tracking for incidents
 - 🔴 **Severity Levels** - LOW, MEDIUM, HIGH, CRITICAL classification
+- 🖼️ **Cloudinary Images** - Incident photos uploaded to Cloudinary with retry support
 
 ## Tech Stack
 
@@ -18,6 +19,7 @@ A modern full-stack application for real-time accident reporting with dispatch m
 - **React 18.3** - UI framework
 - **Vite 7.1** - Fast build tool
 - **Firebase SDK 12.12** - Authentication & Firestore
+- **Cloudinary Upload API** - Image hosting
 - **CSS** - Modern glassmorphism styling
 
 ### Backend
@@ -29,6 +31,7 @@ A modern full-stack application for real-time accident reporting with dispatch m
 ### Infrastructure
 - **Firebase Auth** - User authentication
 - **Cloud Firestore** - Real-time database
+- **Cloudinary** - Image CDN/storage for incident photos
 - **Deployed on**: Localhost (dev environment)
 
 ## Project Structure
@@ -117,6 +120,23 @@ Backend runs on http://localhost:8080
      }
    }
    ```
+
+### Cloudinary Setup (Images)
+
+1. Create a Cloudinary account at https://cloudinary.com
+2. Add these **Vercel Project Environment Variables**:
+  ```
+  CLOUDINARY_CLOUD_NAME=your_cloud_name
+  CLOUDINARY_API_KEY=your_api_key
+  CLOUDINARY_API_SECRET=your_api_secret
+  CLOUDINARY_IMAGE_FOLDER=accidents/images
+  ```
+3. The project includes `api/cloudinary-signature.js` which signs image uploads on the server.
+4. For local dev, set `frontend/.env.local`:
+  ```
+  VITE_CLOUDINARY_SIGNATURE_ENDPOINT=/api/cloudinary-signature
+  ```
+5. Restart the frontend dev server after editing env variables.
 
 ## Database Schema
 
