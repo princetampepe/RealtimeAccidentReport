@@ -1,4 +1,4 @@
-import crypto from "node:crypto";
+const crypto = require("node:crypto");
 
 const MAX_PUBLIC_ID_LENGTH = 160;
 
@@ -21,7 +21,7 @@ function normalizeFolder(input, fallback) {
   return value.replace(/\\+/g, "/").replace(/\/+$/g, "").replace(/^\/+/, "");
 }
 
-export default function handler(req, res) {
+function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
     return res.status(405).json({ error: "Method not allowed" });
@@ -94,3 +94,5 @@ export default function handler(req, res) {
     publicId: requestedPublicId || "",
   });
 }
+
+module.exports = handler;
