@@ -661,6 +661,16 @@ export default function App() {
   const mediaInputRef = useRef(null);
   const cameraPhotoInputRef = useRef(null);
   const cameraVideoInputRef = useRef(null);
+  const liveVideoRef = useRef(null);
+  const liveStreamRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const recordedChunksRef = useRef([]);
+
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraMode, setCameraMode] = useState("photo");
+  const [cameraStarting, setCameraStarting] = useState(false);
+  const [cameraRecording, setCameraRecording] = useState(false);
+  const [cameraError, setCameraError] = useState("");
 
   const selectedPosition = useMemo(() => {
     const normalized = normalizeCoordinates(form.latitude, form.longitude);
@@ -1193,6 +1203,169 @@ export default function App() {
     );
   }
 
+  function stopCameraTracks() {
+    if (liveStreamRef.current) {
+      liveStreamRef.current.getTracks().forEach((track) => track.stop());
+      liveStreamRef.current = null;
+    }
+
+    if (liveVideoRef.current) {
+      liveVideoRef.current.srcObject = null;
+    }
+  }
+
+  async function openLiveCamera(mode) {
+    setCameraError("");
+    setCameraMode(mode);
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError("Live camera is not supported by this browser. Falling back to file picker.");
+      if (mode === "photo") {
+        cameraPhotoInputRef.current?.click();
+      } else {
+        cameraVideoInputRef.current?.click();
+      }
+      return;
+    }
+
+    setCameraStarting(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+        },
+        audio: mode === "video",
+      });
+
+      liveStreamRef.current = stream;
+      setCameraOpen(true);
+
+      if (liveVideoRef.current) {
+        liveVideoRef.current.srcObject = stream;
+        await liveVideoRef.current.play().catch(() => {});
+      }
+    } catch {
+      setCameraError("Camera access failed. Allow camera permission and try again.");
+      if (mode === "photo") {
+        cameraPhotoInputRef.current?.click();
+      } else {
+        cameraVideoInputRef.current?.click();
+      }
+    } finally {
+      setCameraStarting(false);
+    }
+  }
+
+  function closeLiveCamera() {
+    if (cameraRecording && mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+    }
+
+    setCameraRecording(false);
+    setCameraOpen(false);
+    stopCameraTracks();
+    recordedChunksRef.current = [];
+  }
+
+  async function capturePhotoFromLiveCamera() {
+    const video = liveVideoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      setCameraError("Camera is not ready yet. Please wait and try again.");
+      return;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      setCameraError("Could not capture photo from camera.");
+      return;
+    }
+
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const blob = await new Promise((resolve) => {
+      canvas.toBlob(resolve, "image/jpeg", 0.92);
+    });
+
+    if (!blob) {
+      setCameraError("Photo capture failed. Please try again.");
+      return;
+    }
+
+    const fileName = `camera-photo-${Date.now()}.jpg`;
+    const file = new File([blob], fileName, { type: "image/jpeg" });
+
+    await uploadFilesImmediately([file], "camera-photo");
+    closeLiveCamera();
+  }
+
+  function startVideoRecording() {
+    if (!liveStreamRef.current) {
+      setCameraError("Camera stream is not available.");
+      return;
+    }
+
+    if (typeof MediaRecorder === "undefined") {
+      setCameraError("Video recording is not supported in this browser.");
+      return;
+    }
+
+    recordedChunksRef.current = [];
+    try {
+      const recorder = new MediaRecorder(liveStreamRef.current, {
+        mimeType: "video/webm",
+      });
+
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          recordedChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        try {
+          const blob = new Blob(recordedChunksRef.current, { type: "video/webm" });
+          if (!blob.size) {
+            setCameraError("Recorded video is empty. Please try again.");
+            return;
+          }
+
+          const file = new File([blob], `camera-video-${Date.now()}.webm`, {
+            type: "video/webm",
+          });
+
+          await uploadFilesImmediately([file], "camera-video");
+        } finally {
+          closeLiveCamera();
+        }
+      };
+
+      recorder.start();
+      setCameraRecording(true);
+      setCameraError("");
+    } catch {
+      setCameraError("Could not start video recording on this browser/device.");
+    }
+  }
+
+  function stopVideoRecording() {
+    if (mediaRecorderRef.current && cameraRecording) {
+      mediaRecorderRef.current.stop();
+      setCameraRecording(false);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      stopCameraTracks();
+    };
+  }, []);
+
   async function uploadFilesImmediately(files, sourceLabel) {
     if (!files.length) return;
 
@@ -1664,20 +1837,55 @@ export default function App() {
                 <button
                   type="button"
                   className="secondary-button"
-                  onClick={() => cameraPhotoInputRef.current?.click()}
+                  onClick={() => openLiveCamera("photo")}
                   disabled={submitting || instantUploadBusy}
                 >
-                  Open Camera (Auto Upload Photo)
+                  {cameraStarting && cameraMode === "photo"
+                    ? "Opening Camera..."
+                    : "Open Camera (Auto Upload Photo)"}
                 </button>
                 <button
                   type="button"
                   className="secondary-button"
-                  onClick={() => cameraVideoInputRef.current?.click()}
+                  onClick={() => openLiveCamera("video")}
                   disabled={submitting || instantUploadBusy}
                 >
-                  Record Video (Auto Upload)
+                  {cameraStarting && cameraMode === "video"
+                    ? "Opening Camera..."
+                    : "Record Video (Auto Upload)"}
                 </button>
               </div>
+
+              {cameraError && <p className="camera-error">{cameraError}</p>}
+
+              {cameraOpen && (
+                <div className="camera-live-panel">
+                  <video ref={liveVideoRef} autoPlay playsInline muted className="camera-live-preview" />
+                  <div className="camera-live-actions">
+                    {cameraMode === "photo" ? (
+                      <button
+                        type="button"
+                        onClick={capturePhotoFromLiveCamera}
+                        disabled={instantUploadBusy}
+                      >
+                        Capture Photo
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={cameraRecording ? stopVideoRecording : startVideoRecording}
+                        disabled={instantUploadBusy}
+                      >
+                        {cameraRecording ? "Stop Recording" : "Start Recording"}
+                      </button>
+                    )}
+
+                    <button type="button" className="secondary-button" onClick={closeLiveCamera}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <input
                 ref={cameraPhotoInputRef}
