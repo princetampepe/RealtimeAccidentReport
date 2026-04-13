@@ -84,6 +84,10 @@ function buildMediaFileKey(file, index) {
   return `${index}:${file.name}:${file.size}`;
 }
 
+function createDraftAccidentId() {
+  return doc(collection(db, "accidents")).id;
+}
+
 async function fetchCloudinarySignedParams({ folder, publicId }) {
   const response = await fetch(CLOUDINARY_SIGNATURE_ENDPOINT, {
     method: "POST",
@@ -634,7 +638,9 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [mapsLinkInput, setMapsLinkInput] = useState("");
   const [locationSource, setLocationSource] = useState("");
+  const [draftReportId, setDraftReportId] = useState(() => createDraftAccidentId());
   const [selectedFiles, setSelectedFiles] = useState([]);
+  const [uploadedMedia, setUploadedMedia] = useState([]);
   const [allowDuplicateSubmit, setAllowDuplicateSubmit] = useState(false);
   const [uploadProgressMap, setUploadProgressMap] = useState({});
   const [uploadAttemptMap, setUploadAttemptMap] = useState({});
@@ -644,6 +650,7 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [geoLoading, setGeoLoading] = useState(false);
+  const [instantUploadBusy, setInstantUploadBusy] = useState(false);
   const [addressLoading, setAddressLoading] = useState(false);
   const [addressHint, setAddressHint] = useState("");
   const [operatorLocLoading, setOperatorLocLoading] = useState(false);
@@ -652,6 +659,8 @@ export default function App() {
 
   const geocodeRequestIdRef = useRef(0);
   const mediaInputRef = useRef(null);
+  const cameraPhotoInputRef = useRef(null);
+  const cameraVideoInputRef = useRef(null);
 
   const selectedPosition = useMemo(() => {
     const normalized = normalizeCoordinates(form.latitude, form.longitude);
@@ -660,15 +669,12 @@ export default function App() {
   }, [form.latitude, form.longitude]);
 
   const overallUploadProgress = useMemo(() => {
-    if (!selectedFiles.length) return 0;
+    const progressValues = Object.values(uploadProgressMap);
+    if (!progressValues.length) return 0;
 
-    const total = selectedFiles.reduce((sum, file, index) => {
-      const key = buildMediaFileKey(file, index);
-      return sum + (uploadProgressMap[key] ?? 0);
-    }, 0);
-
-    return Math.round(total / selectedFiles.length);
-  }, [selectedFiles, uploadProgressMap]);
+    const total = progressValues.reduce((sum, value) => sum + Number(value || 0), 0);
+    return Math.round(total / progressValues.length);
+  }, [uploadProgressMap]);
 
   const mapCenter = selectedPosition || DEFAULT_MAP_CENTER;
 
@@ -861,6 +867,87 @@ export default function App() {
     }
   }
 
+  async function uploadSingleEvidenceFile({
+    file,
+    reportId,
+    fileKey,
+    itemNumber,
+    itemTotal,
+  }) {
+    const safeName = sanitizeFileName(file.name);
+    const uploadTimestamp = Date.now();
+
+    setUploadStatusMessage(`Uploading evidence ${itemNumber}/${itemTotal}`);
+
+    if (file.type.startsWith("image/")) {
+      const imagePublicId = `${reportId}-${uploadTimestamp}-${itemNumber}-${safeName.replace(/\.[^/.]+$/, "")}`;
+      const cloudinaryResult = await uploadCloudinaryImageWithRetry({
+        file,
+        folder: CLOUDINARY_IMAGE_FOLDER,
+        publicId: imagePublicId,
+        maxAttempts: UPLOAD_MAX_ATTEMPTS,
+        onAttempt: (attempt, max) => {
+          setUploadAttemptMap((prev) => ({
+            ...prev,
+            [fileKey]: { attempt, max },
+          }));
+        },
+        onProgress: (percent) => {
+          setUploadProgressMap((prev) => ({
+            ...prev,
+            [fileKey]: percent,
+          }));
+        },
+      });
+
+      return {
+        url: cloudinaryResult.secureUrl,
+        name: file.name,
+        storagePath: null,
+        cloudinaryPublicId: cloudinaryResult.publicId,
+        cloudinaryAssetId: cloudinaryResult.assetId,
+        provider: "cloudinary",
+        type: "image",
+        contentType: file.type || "",
+        size: file.size,
+        attemptsUsed: cloudinaryResult.attemptsUsed,
+      };
+    }
+
+    const path = `accidents/${reportId}/${uploadTimestamp}-${itemNumber}-${safeName}`;
+
+    const { url, attemptsUsed } = await uploadEvidenceFileWithRetry({
+      file,
+      targetPath: path,
+      maxAttempts: UPLOAD_MAX_ATTEMPTS,
+      onAttempt: (attempt, max) => {
+        setUploadAttemptMap((prev) => ({
+          ...prev,
+          [fileKey]: { attempt, max },
+        }));
+      },
+      onProgress: (percent) => {
+        setUploadProgressMap((prev) => ({
+          ...prev,
+          [fileKey]: percent,
+        }));
+      },
+    });
+
+    return {
+      url,
+      name: file.name,
+      storagePath: path,
+      cloudinaryPublicId: null,
+      cloudinaryAssetId: null,
+      provider: "firebase-storage",
+      type: file.type.startsWith("video/") ? "video" : "image",
+      contentType: file.type || "",
+      size: file.size,
+      attemptsUsed,
+    };
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
     if (!user || !dispatchId) {
@@ -886,6 +973,19 @@ export default function App() {
         return;
       }
 
+      if (instantUploadBusy) {
+        setError("Please wait for camera auto-upload to finish before submitting.");
+        setSubmitting(false);
+        return;
+      }
+
+      const totalAttachmentCount = uploadedMedia.length + selectedFiles.length;
+      if (totalAttachmentCount > MAX_MEDIA_FILES) {
+        setError(`Attach up to ${MAX_MEDIA_FILES} files only.`);
+        setSubmitting(false);
+        return;
+      }
+
       const mediaValidationError = validateMediaFiles(selectedFiles);
       if (mediaValidationError) {
         setError(mediaValidationError);
@@ -905,86 +1005,23 @@ export default function App() {
         selectedFiles.length ? "Preparing evidence upload..." : ""
       );
 
-      const accidentRef = doc(collection(db, "accidents"));
-      const uploadTimestamp = Date.now();
-      const mediaAttachments = await Promise.all(
+      const reportId = draftReportId || createDraftAccidentId();
+      const accidentRef = doc(db, "accidents", reportId);
+
+      const queuedMediaAttachments = await Promise.all(
         selectedFiles.map(async (file, index) => {
           const fileKey = buildMediaFileKey(file, index);
-          const safeName = sanitizeFileName(file.name);
-
-          setUploadStatusMessage(
-            `Uploading evidence ${index + 1}/${selectedFiles.length}`
-          );
-
-          if (file.type.startsWith("image/")) {
-            const imagePublicId = `${accidentRef.id}-${uploadTimestamp}-${index}-${safeName.replace(/\.[^/.]+$/, "")}`;
-            const cloudinaryResult = await uploadCloudinaryImageWithRetry({
-              file,
-              folder: CLOUDINARY_IMAGE_FOLDER,
-              publicId: imagePublicId,
-              maxAttempts: UPLOAD_MAX_ATTEMPTS,
-              onAttempt: (attempt, max) => {
-                setUploadAttemptMap((prev) => ({
-                  ...prev,
-                  [fileKey]: { attempt, max },
-                }));
-              },
-              onProgress: (percent) => {
-                setUploadProgressMap((prev) => ({
-                  ...prev,
-                  [fileKey]: percent,
-                }));
-              },
-            });
-
-            return {
-              url: cloudinaryResult.secureUrl,
-              name: file.name,
-              storagePath: null,
-              cloudinaryPublicId: cloudinaryResult.publicId,
-              cloudinaryAssetId: cloudinaryResult.assetId,
-              provider: "cloudinary",
-              type: "image",
-              contentType: file.type || "",
-              size: file.size,
-              attemptsUsed: cloudinaryResult.attemptsUsed,
-            };
-          }
-
-          const path = `accidents/${accidentRef.id}/${uploadTimestamp}-${index}-${safeName}`;
-
-          const { url, attemptsUsed } = await uploadEvidenceFileWithRetry({
+          return uploadSingleEvidenceFile({
             file,
-            targetPath: path,
-            maxAttempts: UPLOAD_MAX_ATTEMPTS,
-            onAttempt: (attempt, max) => {
-              setUploadAttemptMap((prev) => ({
-                ...prev,
-                [fileKey]: { attempt, max },
-              }));
-            },
-            onProgress: (percent) => {
-              setUploadProgressMap((prev) => ({
-                ...prev,
-                [fileKey]: percent,
-              }));
-            },
+            reportId,
+            fileKey,
+            itemNumber: uploadedMedia.length + index + 1,
+            itemTotal: totalAttachmentCount,
           });
-
-          return {
-            url,
-            name: file.name,
-            storagePath: path,
-            cloudinaryPublicId: null,
-            cloudinaryAssetId: null,
-            provider: "firebase-storage",
-            type: file.type.startsWith("video/") ? "video" : "image",
-            contentType: file.type || "",
-            size: file.size,
-            attemptsUsed,
-          };
         })
       );
+
+      const mediaAttachments = [...uploadedMedia, ...queuedMediaAttachments];
 
       await setDoc(accidentRef, {
         dispatchId: dispatchId,
@@ -1019,11 +1056,20 @@ export default function App() {
       setAllowDuplicateSubmit(false);
       setAddressHint("");
       setSelectedFiles([]);
+      setUploadedMedia([]);
       setUploadProgressMap({});
       setUploadAttemptMap({});
       setUploadStatusMessage("");
+      setInstantUploadBusy(false);
+      setDraftReportId(createDraftAccidentId());
       if (mediaInputRef.current) {
         mediaInputRef.current.value = "";
+      }
+      if (cameraPhotoInputRef.current) {
+        cameraPhotoInputRef.current.value = "";
+      }
+      if (cameraVideoInputRef.current) {
+        cameraVideoInputRef.current.value = "";
       }
     } catch (err) {
       if ((err?.code || "").startsWith("storage/")) {
@@ -1147,11 +1193,95 @@ export default function App() {
     );
   }
 
+  async function uploadFilesImmediately(files, sourceLabel) {
+    if (!files.length) return;
+
+    const projectedCount = uploadedMedia.length + selectedFiles.length + files.length;
+    if (projectedCount > MAX_MEDIA_FILES) {
+      setError(`Attach up to ${MAX_MEDIA_FILES} files only.`);
+      return;
+    }
+
+    const mediaValidationError = validateMediaFiles([...selectedFiles, ...files]);
+    if (mediaValidationError) {
+      setError(mediaValidationError);
+      return;
+    }
+
+    const reportId = draftReportId || createDraftAccidentId();
+    if (!draftReportId) {
+      setDraftReportId(reportId);
+    }
+
+    setError("");
+    setInstantUploadBusy(true);
+    setUploadProgressMap({});
+    setUploadAttemptMap({});
+    setUploadStatusMessage("Preparing camera auto-upload...");
+
+    const uploadedItems = [];
+
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      const fileKey = buildMediaFileKey(
+        file,
+        `${sourceLabel}-${Date.now()}-${index}`
+      );
+
+      try {
+        const attachment = await uploadSingleEvidenceFile({
+          file,
+          reportId,
+          fileKey,
+          itemNumber: index + 1,
+          itemTotal: files.length,
+        });
+
+        uploadedItems.push({ ...attachment, uploadSource: sourceLabel });
+      } catch (err) {
+        if ((err?.code || "").startsWith("storage/")) {
+          setError(getStorageErrorMessage(err));
+        } else if ((err?.code || "").startsWith("cloudinary/")) {
+          setError(getCloudinaryErrorMessage(err));
+        } else {
+          setError(err?.message || "Camera auto-upload failed.");
+        }
+        setUploadStatusMessage("Camera auto-upload failed. Please retry.");
+        setInstantUploadBusy(false);
+        return;
+      }
+    }
+
+    setUploadedMedia((prev) => [...prev, ...uploadedItems]);
+    setUploadStatusMessage("Camera auto-upload completed.");
+    setInstantUploadBusy(false);
+  }
+
+  async function handleCameraPhotoCapture(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    await uploadFilesImmediately(files, "camera-photo");
+  }
+
+  async function handleCameraVideoCapture(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    await uploadFilesImmediately(files, "camera-video");
+  }
+
   function handleMediaSelection(event) {
     const pickedFiles = Array.from(event.target.files || []);
     if (!pickedFiles.length) return;
 
     const merged = [...selectedFiles, ...pickedFiles];
+    if (uploadedMedia.length + merged.length > MAX_MEDIA_FILES) {
+      setError(`Attach up to ${MAX_MEDIA_FILES} files only.`);
+      if (mediaInputRef.current) {
+        mediaInputRef.current.value = "";
+      }
+      return;
+    }
+
     const mediaValidationError = validateMediaFiles(merged);
 
     if (mediaValidationError) {
@@ -1179,6 +1309,10 @@ export default function App() {
     setUploadStatusMessage("");
   }
 
+  function removeUploadedMedia(index) {
+    setUploadedMedia((prev) => prev.filter((_, currentIndex) => currentIndex !== index));
+  }
+
   async function markResolved(item) {
     setError("");
     try {
@@ -1204,6 +1338,13 @@ export default function App() {
     setError("");
     try {
       await signOut(auth);
+      setDraftReportId(createDraftAccidentId());
+      setSelectedFiles([]);
+      setUploadedMedia([]);
+      setUploadProgressMap({});
+      setUploadAttemptMap({});
+      setUploadStatusMessage("");
+      setInstantUploadBusy(false);
     } catch (err) {
       setError(err.message);
     }
@@ -1519,6 +1660,43 @@ export default function App() {
                 <p>Attach up to 4 files. Images up to 8 MB each, videos up to 20 MB each.</p>
               </div>
 
+              <div className="camera-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => cameraPhotoInputRef.current?.click()}
+                  disabled={submitting || instantUploadBusy}
+                >
+                  Open Camera (Auto Upload Photo)
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => cameraVideoInputRef.current?.click()}
+                  disabled={submitting || instantUploadBusy}
+                >
+                  Record Video (Auto Upload)
+                </button>
+              </div>
+
+              <input
+                ref={cameraPhotoInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                style={{ display: "none" }}
+                onChange={handleCameraPhotoCapture}
+              />
+
+              <input
+                ref={cameraVideoInputRef}
+                type="file"
+                accept="video/*"
+                capture="environment"
+                style={{ display: "none" }}
+                onChange={handleCameraVideoCapture}
+              />
+
               <input
                 ref={mediaInputRef}
                 type="file"
@@ -1546,13 +1724,33 @@ export default function App() {
                 </ul>
               )}
 
-              {selectedFiles.length > 0 && (
+              {uploadedMedia.length > 0 && (
+                <ul className="uploaded-media-list">
+                  {uploadedMedia.map((media, index) => (
+                    <li key={`${media.url}-${index}`}>
+                      <span>
+                        {media.name} ({media.type === "video" ? "video" : "image"}, auto-uploaded)
+                      </span>
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => removeUploadedMedia(index)}
+                      >
+                        Detach
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {(selectedFiles.length > 0 || uploadedMedia.length > 0) && (
                 <p className="upload-policy-note">
-                  Images upload to Cloudinary using server-signed requests, videos upload to Firebase Storage. Automatic retry is enabled for temporary failures.
+                  Camera capture uploads immediately and attaches to this draft report. Images use Cloudinary signed uploads; videos use Firebase Storage.
                 </p>
               )}
 
-              {submitting && selectedFiles.length > 0 && (
+              {(submitting || instantUploadBusy) &&
+                Object.keys(uploadProgressMap).length > 0 && (
                 <div className="upload-progress-panel">
                   <p>
                     {uploadStatusMessage ||
@@ -1565,14 +1763,14 @@ export default function App() {
                     />
                   </div>
                   <ul className="upload-item-progress-list">
-                    {selectedFiles.map((file, index) => {
-                      const fileKey = buildMediaFileKey(file, index);
-                      const progress = uploadProgressMap[fileKey] ?? 0;
+                    {Object.entries(uploadProgressMap).map(([fileKey, progress]) => {
                       const attemptInfo = uploadAttemptMap[fileKey];
+                      const keyParts = String(fileKey).split(":");
+                      const displayName = keyParts.length > 1 ? keyParts[1] : fileKey;
 
                       return (
                         <li key={`${fileKey}-progress`}>
-                          <span>{file.name}</span>
+                          <span>{displayName}</span>
                           <span>
                             {progress}%
                             {attemptInfo
@@ -1615,6 +1813,7 @@ export default function App() {
               type="submit"
               disabled={
                 submitting ||
+                instantUploadBusy ||
                 !user ||
                 !selectedPosition ||
                 (duplicateCandidates.length > 0 && !allowDuplicateSubmit)

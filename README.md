@@ -12,6 +12,7 @@ A modern full-stack application for real-time accident reporting with dispatch m
 - 🗺️ **Geolocation Support** - Latitude/longitude tracking for incidents
 - 🔴 **Severity Levels** - LOW, MEDIUM, HIGH, CRITICAL classification
 - 🖼️ **Cloudinary Images** - Incident photos uploaded to Cloudinary with retry support
+- 📷 **Camera Auto Upload** - Capture from camera and auto-attach media before submit
 
 ## Tech Stack
 
