@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "Accident Reporting Mobile",
+    "slug": "accident-reporting-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "jsEngine": "hermes",
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Accident Reporting Mobile to use your location to pinpoint incidents accurately."
+        }
+      ],
+      "expo-asset"
+    ],
+    "extra": {
+      "firebaseApiKey": "",
+      "firebaseAuthDomain": "",
+      "firebaseProjectId": "",
+      "firebaseStorageBucket": "",
+      "firebaseMessagingSenderId": "",
+      "firebaseAppId": ""
+    }
+  }
+}

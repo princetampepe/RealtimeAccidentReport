@@ -53,6 +53,22 @@ const DUPLICATE_RADIUS_KM = 0.6;
 const DUPLICATE_WINDOW_HOURS = 6;
 const ETA_SPEED_KMPH = 35;
 const FEED_ITEMS_PER_PAGE = 8;
+const INCIDENT_TITLE_PRESETS = [
+  "Motorcycle collision",
+  "Multi-vehicle collision",
+  "Pedestrian hit",
+  "Truck rollover",
+  "Bus collision",
+  "Road obstruction crash",
+];
+const STRUCTURED_DETAILS_TEMPLATE = [
+  "Vehicles involved:",
+  "Injuries observed:",
+  "Road blockage level (none/partial/full):",
+  "Hazards (fuel spill/fire/debris):",
+  "Nearest landmark:",
+  "Immediate assistance needed:",
+].join("\n");
 const CLOUDINARY_CLOUD_NAME_FALLBACK =
   import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || "";
 const CLOUDINARY_API_KEY_FALLBACK =
@@ -71,7 +87,7 @@ function getPageFromHash(hashValue) {
     .toLowerCase()
     .trim();
 
-  if (["report", "feed", "profile"].includes(normalized)) {
+  if (["report", "feed", "profile", "notifications"].includes(normalized)) {
     return normalized;
   }
   return "feed";
@@ -384,6 +400,7 @@ function formatBytes(bytes) {
 
 function getLocationSourceLabel(source) {
   if (source === "gps") return "GPS";
+  if (source === "gps-auto") return "Auto GPS";
   if (source === "maps-link") return "Maps Link";
   if (source === "map-click") return "Map Pin";
   return "Unknown";
@@ -716,6 +733,7 @@ export default function App() {
     typeof window === "undefined" ? "feed" : getPageFromHash(window.location.hash)
   );
   const [user, setUser] = useState(null);
+  const [userRole, setUserRole] = useState("DISPATCHER");
   const [dispatchId, setDispatchId] = useState(null);
   const [authReady, setAuthReady] = useState(false);
   const [mapsLinkInput, setMapsLinkInput] = useState("");
@@ -735,6 +753,7 @@ export default function App() {
   const [instantUploadBusy, setInstantUploadBusy] = useState(false);
   const [addressLoading, setAddressLoading] = useState(false);
   const [addressHint, setAddressHint] = useState("");
+  const [autoLocateAttempted, setAutoLocateAttempted] = useState(false);
   const [operatorLocLoading, setOperatorLocLoading] = useState(false);
   const [operatorLocation, setOperatorLocation] = useState(null);
   const [error, setError] = useState("");
@@ -760,6 +779,8 @@ export default function App() {
     if (!normalized) return null;
     return [normalized.lat, normalized.lng];
   }, [form.latitude, form.longitude]);
+
+  const isResponderOrAdmin = userRole === "RESPONDER" || userRole === "ADMIN";
 
   const overallUploadProgress = useMemo(() => {
     const progressValues = Object.values(uploadProgressMap);
@@ -906,7 +927,7 @@ export default function App() {
 
   const stats = useMemo(() => {
     const total = accidents.length;
-    const active = accidents.filter((item) => item.status === "ACTIVE").length;
+    const active = accidents.filter((item) => item.status !== "RESOLVED").length;
     const critical = accidents.filter((item) => item.severity === "CRITICAL").length;
     const high = accidents.filter((item) => item.severity === "HIGH").length;
     return { total, active, critical, high };
@@ -915,16 +936,73 @@ export default function App() {
   const profileStats = useMemo(() => {
     const mine = accidents.filter((item) => item.reporterId === user?.uid);
     const pending = mine.filter((item) => item.status === "RESOLUTION_PENDING").length;
+    const responded = mine.filter((item) => item.status === "RESPONDED").length;
     const resolved = mine.filter((item) => item.status === "RESOLVED").length;
     const active = mine.filter((item) => item.status === "ACTIVE").length;
 
     return {
       totalMine: mine.length,
       active,
+      responded,
       pending,
       resolved,
     };
   }, [accidents, user]);
+
+  const notifications = useMemo(() => {
+    if (!user) return [];
+
+    const now = Date.now();
+    const items = [];
+
+    for (const accident of accidentsWithMeta) {
+      const status = accident.status || "ACTIVE";
+      const reportedAtMs = accident.reportedAtMs || 0;
+      const ageMinutes = reportedAtMs ? Math.max(1, Math.round((now - reportedAtMs) / (1000 * 60))) : null;
+
+      if (
+        status === "RESOLUTION_PENDING" &&
+        isResponderOrAdmin &&
+        accident.reporterId !== user.uid
+      ) {
+        const confirmedBy = Array.isArray(accident?.resolution?.confirmedBy)
+          ? accident.resolution.confirmedBy
+          : [];
+        if (!confirmedBy.includes(user.uid)) {
+          items.push({
+            id: `${accident.id}-pending`,
+            type: "action",
+            title: `Resolution review needed: ${accident.title || "Untitled"}`,
+            message: "A reporter requested closure. Your confirmation is required.",
+            when: accident.reportedAt,
+          });
+        }
+      }
+
+      if (status === "RESPONDED" && accident.reporterId === user.uid) {
+        items.push({
+          id: `${accident.id}-responded`,
+          type: "update",
+          title: `Responder assigned: ${accident.title || "Untitled"}`,
+          message: "A responder has acknowledged this incident.",
+          when: accident?.response?.respondedAt || accident.updatedAt,
+        });
+      }
+
+      if (status === "ACTIVE" && accident.severity === "CRITICAL" && ageMinutes != null && ageMinutes <= 120) {
+        items.push({
+          id: `${accident.id}-critical`,
+          type: "critical",
+          title: `Critical incident active: ${accident.title || "Untitled"}`,
+          message: `Reported ${ageMinutes} minute${ageMinutes > 1 ? "s" : ""} ago.`,
+          when: accident.reportedAt,
+        });
+      }
+    }
+
+    items.sort((first, second) => toMillis(second.when) - toMillis(first.when));
+    return items;
+  }, [accidentsWithMeta, user, isResponderOrAdmin]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
@@ -934,15 +1012,19 @@ export default function App() {
           const userDoc = await getDoc(doc(db, "users", nextUser.uid));
           if (userDoc.exists()) {
             setDispatchId(userDoc.data().dispatchId);
+            setUserRole(userDoc.data().role || "DISPATCHER");
           } else {
             setDispatchId(null);
+            setUserRole("DISPATCHER");
           }
         } catch (err) {
           console.error("Error fetching dispatch ID:", err);
           setDispatchId(null);
+          setUserRole("DISPATCHER");
         }
       } else {
         setDispatchId(null);
+        setUserRole("DISPATCHER");
       }
       setAuthReady(true);
     });
@@ -993,9 +1075,11 @@ export default function App() {
         await setDoc(doc(db, "users", userCred.user.uid), {
           email: userCred.user.email,
           dispatchId: newDispatchId,
+          role: "DISPATCHER",
           createdAt: serverTimestamp(),
         });
         setDispatchId(newDispatchId);
+        setUserRole("DISPATCHER");
       } else {
         await signInWithEmailAndPassword(auth, email, password);
       }
@@ -1202,6 +1286,7 @@ export default function App() {
       setUploadAttemptMap({});
       setUploadStatusMessage("");
       setInstantUploadBusy(false);
+      setAutoLocateAttempted(false);
       setDraftReportId(createDraftAccidentId());
       if (mediaInputRef.current) {
         mediaInputRef.current.value = "";
@@ -1308,6 +1393,41 @@ export default function App() {
       { enableHighAccuracy: true, timeout: 12000 }
     );
   }
+
+  useEffect(() => {
+    if (
+      !user ||
+      activePage !== "report" ||
+      autoLocateAttempted ||
+      selectedPosition ||
+      geoLoading
+    ) {
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      setAutoLocateAttempted(true);
+      return;
+    }
+
+    setAutoLocateAttempted(true);
+    setGeoLoading(true);
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setSelectedLocation(position.coords.latitude, position.coords.longitude, {
+          source: "gps-auto",
+          accuracyMeters: position.coords.accuracy,
+        });
+        setAddressHint("Auto-detected your location. You can still move the pin manually.");
+        setGeoLoading(false);
+      },
+      () => {
+        setGeoLoading(false);
+      },
+      { enableHighAccuracy: true, timeout: 9000 }
+    );
+  }, [activePage, autoLocateAttempted, geoLoading, selectedPosition, user]);
 
   function locateDispatcherForNearestSort() {
     if (!navigator.geolocation) {
@@ -1763,6 +1883,111 @@ export default function App() {
     }
   }
 
+  async function markResponded(item) {
+    setError("");
+
+    if (!user) {
+      setError("Please sign in first.");
+      return;
+    }
+
+    if (!isResponderOrAdmin) {
+      setError("Only responder/admin accounts can mark incidents as responded.");
+      return;
+    }
+
+    if (item.status !== "ACTIVE") {
+      setError("Only active incidents can be marked as responded.");
+      return;
+    }
+
+    const noteInput = window.prompt("Responder note (what was done on site).", "Responder en route and coordinating traffic control.");
+    if (noteInput == null) {
+      return;
+    }
+
+    const note = noteInput.trim();
+    if (note.length < 8) {
+      setError("Responder note must be at least 8 characters.");
+      return;
+    }
+
+    try {
+      await updateDoc(doc(db, "accidents", item.id), {
+        status: "RESPONDED",
+        response: {
+          respondedBy: user.uid,
+          respondedByEmail: user.email || "",
+          responderRole: userRole,
+          note,
+          respondedAt: serverTimestamp(),
+        },
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      setError(getFirestoreErrorMessage(err));
+    }
+  }
+
+  async function resolveFromResponder(item) {
+    setError("");
+
+    if (!user) {
+      setError("Please sign in first.");
+      return;
+    }
+
+    if (!isResponderOrAdmin) {
+      setError("Only responder/admin accounts can finalize responder resolutions.");
+      return;
+    }
+
+    if (item.status !== "RESPONDED") {
+      setError("Incident must be in RESPONDED state before resolving.");
+      return;
+    }
+
+    const responderOwner = item?.response?.respondedBy;
+    if (userRole !== "ADMIN" && responderOwner && responderOwner !== user.uid) {
+      setError("Only the assigned responder or an admin can finalize this incident.");
+      return;
+    }
+
+    const noteInput = window.prompt("Final resolution summary.", "Responder completed scene clearing and handoff.");
+    if (noteInput == null) {
+      return;
+    }
+
+    const note = noteInput.trim();
+    if (note.length < RESOLUTION_NOTE_MIN_LENGTH) {
+      setError(`Resolution note must be at least ${RESOLUTION_NOTE_MIN_LENGTH} characters.`);
+      return;
+    }
+
+    try {
+      await updateDoc(doc(db, "accidents", item.id), {
+        status: "RESOLVED",
+        resolution: {
+          note,
+          requestedBy: item?.response?.respondedBy || user.uid,
+          requestedByEmail: item?.response?.respondedByEmail || user.email || "",
+          requestedAt: item?.response?.respondedAt || serverTimestamp(),
+          confirmedBy: item?.response?.respondedBy
+            ? [item.response.respondedBy]
+            : [user.uid],
+          confirmationCount: 1,
+          confirmationsRequired: 1,
+          finalizedBy: user.uid,
+          finalizedByEmail: user.email || "",
+          finalizedAt: serverTimestamp(),
+        },
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      setError(getFirestoreErrorMessage(err));
+    }
+  }
+
   async function removeAccident(id) {
     setError("");
     try {
@@ -1783,6 +2008,7 @@ export default function App() {
       setUploadAttemptMap({});
       setUploadStatusMessage("");
       setInstantUploadBusy(false);
+      setAutoLocateAttempted(false);
     } catch (err) {
       setError(err.message);
     }
@@ -1790,6 +2016,22 @@ export default function App() {
 
   function updateForm(field, value) {
     setForm((prev) => ({ ...prev, [field]: value }));
+  }
+
+  function applyStructuredDetailsTemplate() {
+    setForm((prev) => {
+      const current = (prev.description || "").trim();
+      if (!current) {
+        return { ...prev, description: STRUCTURED_DETAILS_TEMPLATE };
+      }
+      if (current.includes("Vehicles involved:")) {
+        return prev;
+      }
+      return {
+        ...prev,
+        description: `${current}\n\n${STRUCTURED_DETAILS_TEMPLATE}`,
+      };
+    });
   }
 
   if (!authReady) {
@@ -1905,6 +2147,7 @@ export default function App() {
             className={`nav-tab ${activePage === "report" ? "active" : ""}`}
             onClick={() => navigateToPage("report")}
           >
+            <span className="nav-icon" aria-hidden="true">R</span>
             Report
           </button>
           <button
@@ -1912,13 +2155,26 @@ export default function App() {
             className={`nav-tab ${activePage === "feed" ? "active" : ""}`}
             onClick={() => navigateToPage("feed")}
           >
+            <span className="nav-icon" aria-hidden="true">F</span>
             Live Feed
+          </button>
+          <button
+            type="button"
+            className={`nav-tab ${activePage === "notifications" ? "active" : ""}`}
+            onClick={() => navigateToPage("notifications")}
+          >
+            <span className="nav-icon" aria-hidden="true">N</span>
+            Notifications
+            {notifications.length > 0 && (
+              <span className="nav-count">{notifications.length}</span>
+            )}
           </button>
           <button
             type="button"
             className={`nav-tab ${activePage === "profile" ? "active" : ""}`}
             onClick={() => navigateToPage("profile")}
           >
+            <span className="nav-icon" aria-hidden="true">P</span>
             Profile
           </button>
         </div>
@@ -1961,8 +2217,27 @@ export default function App() {
                 value={form.title}
                 onChange={(e) => updateForm("title", e.target.value)}
                 placeholder="Multi-vehicle collision"
+                list="incident-title-presets"
                 required
               />
+              <datalist id="incident-title-presets">
+                {INCIDENT_TITLE_PRESETS.map((preset) => (
+                  <option key={preset} value={preset} />
+                ))}
+              </datalist>
+
+              <div className="preset-row">
+                {INCIDENT_TITLE_PRESETS.map((preset) => (
+                  <button
+                    type="button"
+                    key={preset}
+                    className="preset-chip"
+                    onClick={() => updateForm("title", preset)}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
             </label>
 
             <label>
@@ -1974,6 +2249,18 @@ export default function App() {
                 rows={4}
                 required
               />
+              <div className="description-tools">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={applyStructuredDetailsTemplate}
+                >
+                  Use Structured Template
+                </button>
+                <span className="field-helper">
+                  {form.description.trim().length} chars
+                </span>
+              </div>
             </label>
 
             <div className="location-block">
@@ -2387,6 +2674,8 @@ export default function App() {
                 !alreadyConfirmed;
               const statusTone = item.status === "RESOLVED"
                 ? "resolved"
+                : item.status === "RESPONDED"
+                  ? "responded"
                 : item.status === "RESOLUTION_PENDING"
                   ? "pending"
                   : "active";
@@ -2444,6 +2733,11 @@ export default function App() {
                         Verified {formatDate(resolution.finalizedAt)}
                       </small>
                     )}
+                    {item.status === "RESPONDED" && item?.response?.respondedAt && (
+                      <small className="metric-note">
+                        Responder acknowledged {formatDate(item.response.respondedAt)}
+                      </small>
+                    )}
                   </div>
                   <div className="metric-tile">
                     <span>Reporter</span>
@@ -2469,6 +2763,12 @@ export default function App() {
                     <div className="metric-tile metric-tile-emphasis">
                       <span>Resolution Note</span>
                       <strong>{resolution.note}</strong>
+                    </div>
+                  )}
+                  {item.status === "RESPONDED" && item?.response?.note && (
+                    <div className="metric-tile metric-tile-emphasis">
+                      <span>Responder Note</span>
+                      <strong>{item.response.note}</strong>
                     </div>
                   )}
                   {item.distanceKm != null && (
@@ -2511,14 +2811,39 @@ export default function App() {
 
                 <div className="incident-actions">
                   {item.status === "ACTIVE" && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => requestResolution(item)}
+                        disabled={item.reporterId !== user?.uid}
+                      >
+                        {item.reporterId === user?.uid
+                          ? "Request Resolution"
+                          : "Reporter Only"}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => markResponded(item)}
+                        disabled={!isResponderOrAdmin}
+                      >
+                        Mark Responded
+                      </button>
+                    </>
+                  )}
+
+                  {item.status === "RESPONDED" && (
                     <button
                       type="button"
-                      onClick={() => requestResolution(item)}
-                      disabled={item.reporterId !== user?.uid}
+                      className="secondary-button"
+                      onClick={() => resolveFromResponder(item)}
+                      disabled={
+                        !isResponderOrAdmin ||
+                        (userRole !== "ADMIN" && item?.response?.respondedBy && item.response.respondedBy !== user?.uid)
+                      }
                     >
-                      {item.reporterId === user?.uid
-                        ? "Request Resolution"
-                        : "Reporter Only"}
+                      Resolve Incident
                     </button>
                   )}
 
@@ -2591,6 +2916,34 @@ export default function App() {
         </section>
         )}
 
+        {activePage === "notifications" && (
+        <section className="panel notifications-page">
+          <h3>Notifications</h3>
+          {notifications.length === 0 ? (
+            <p className="empty-state">No new notifications right now.</p>
+          ) : (
+            <ul className="notification-list">
+              {notifications.map((notification) => (
+                <li key={notification.id} className={`notification-card ${notification.type}`}>
+                  <div>
+                    <h4>{notification.title}</h4>
+                    <p>{notification.message}</p>
+                    <small>{formatDate(notification.when)}</small>
+                  </div>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => navigateToPage("feed")}
+                  >
+                    Open Feed
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+        )}
+
         {activePage === "profile" && (
         <section className="panel profile-page">
           <h3>Dispatcher Profile</h3>
@@ -2599,12 +2952,14 @@ export default function App() {
               <h4>Account</h4>
               <p><strong>Email:</strong> {user.email || "-"}</p>
               <p><strong>Dispatch ID:</strong> {dispatchId || "-"}</p>
+              <p><strong>Role:</strong> {userRole}</p>
             </article>
 
             <article className="profile-card">
               <h4>My Reports</h4>
               <p><strong>Total:</strong> {profileStats.totalMine}</p>
               <p><strong>Active:</strong> {profileStats.active}</p>
+              <p><strong>Responded:</strong> {profileStats.responded}</p>
               <p><strong>Pending Resolution:</strong> {profileStats.pending}</p>
               <p><strong>Resolved:</strong> {profileStats.resolved}</p>
             </article>

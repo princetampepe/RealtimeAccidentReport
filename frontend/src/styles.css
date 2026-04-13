@@ -164,7 +164,7 @@ body {
 
 .page-nav {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.5rem;
 }
 
@@ -173,6 +173,32 @@ body {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-main);
   border-radius: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+}
+
+.nav-icon {
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.66rem;
+  font-weight: 800;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.nav-count {
+  min-width: 1.2rem;
+  padding: 0.05rem 0.32rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  background: rgba(255, 90, 119, 0.92);
+  color: #fff;
 }
 
 .nav-tab:hover {
@@ -233,6 +259,38 @@ body {
   gap: 0.35rem;
   color: var(--text-soft);
   font-size: 0.9rem;
+}
+
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.preset-chip {
+  padding: 0.3rem 0.56rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  color: #e8f0ff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  font-size: 0.8rem;
+}
+
+.preset-chip:hover {
+  box-shadow: 0 8px 16px rgba(8, 16, 34, 0.3);
+}
+
+.description-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.field-helper {
+  color: var(--text-soft);
+  font-size: 0.8rem;
 }
 
 input,
@@ -550,6 +608,11 @@ button:disabled {
 .status-pill.pending {
   background: rgba(246, 192, 86, 0.18);
   color: #fbd88d;
+}
+
+.status-pill.responded {
+  background: rgba(126, 187, 255, 0.17);
+  color: #bfdcff;
 }
 
 .status-pill.resolved {
@@ -876,6 +939,54 @@ button:disabled {
   gap: 0.35rem;
 }
 
+.notifications-page {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.notification-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.notification-card {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 14px;
+  padding: 0.7rem;
+  background: rgba(255, 255, 255, 0.04);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.notification-card h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.98rem;
+}
+
+.notification-card p {
+  margin: 0 0 0.3rem;
+  color: var(--text-soft);
+}
+
+.notification-card small {
+  color: #95abd4;
+}
+
+.notification-card.critical {
+  border-color: rgba(255, 90, 119, 0.5);
+  background: rgba(255, 90, 119, 0.1);
+}
+
+.notification-card.action {
+  border-color: rgba(246, 192, 86, 0.52);
+  background: rgba(246, 192, 86, 0.1);
+}
+
 @keyframes rise-in {
   from {
     opacity: 0;
@@ -902,6 +1013,10 @@ button:disabled {
 
   .profile-grid {
     grid-template-columns: 1fr;
+  }
+
+  .notification-card {
+    flex-direction: column;
   }
 }
 

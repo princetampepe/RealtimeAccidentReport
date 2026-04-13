@@ -50,6 +50,12 @@ realtime reporting/
 │   │   └── main.jsx         # Entry point
 │   ├── package.json
 │   └── vite.config.js
+├── mobile/
+│   ├── App.js             # Expo cross-platform client
+│   ├── app.json           # Expo config + Firebase extra fields
+│   ├── package.json
+│   └── src/
+│       └── firebase.js
 ├── backend/
 │   ├── src/
 │   │   └── main/
@@ -67,6 +73,22 @@ realtime reporting/
 ```
 
 ## Setup Instructions
+
+### Mobile App Setup (Expo)
+
+```bash
+cd mobile
+npm install
+npm run start
+```
+
+Set Firebase values in `mobile/app.json` under `expo.extra`.
+
+The mobile scaffold includes:
+- Report / Feed / Notifications / Profile pages
+- Title presets + structured report template
+- Current-location button and responder actions
+- Role-aware resolution flow support
 
 ### Prerequisites
 - Node.js 18+

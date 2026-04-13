@@ -9,8 +9,38 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == uid;
     }
 
+    function currentUserRole() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        ? (
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role != null
+          ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+          : 'DISPATCHER'
+        )
+        : 'DISPATCHER';
+    }
+
+    function isResponderOrAdmin() {
+      return currentUserRole() in ['RESPONDER', 'ADMIN'];
+    }
+
+    function isAdmin() {
+      return currentUserRole() == 'ADMIN';
+    }
+
     match /users/{userId} {
-      allow read, create, update, delete: if isOwner(userId);
+      allow read, delete: if isOwner(userId);
+
+      allow create: if isOwner(userId)
+        && request.resource.data.email is string
+        && request.resource.data.dispatchId is string
+        && request.resource.data.role == 'DISPATCHER';
+
+      allow update: if isOwner(userId)
+        && (
+          request.resource.data.role == resource.data.role
+          || (resource.data.role == null && request.resource.data.role == 'DISPATCHER')
+        );
     }
 
     match /accidents/{reportId} {
@@ -26,7 +56,8 @@ service cloud.firestore {
           && (
             (resource.data.status == 'ACTIVE' && request.resource.data.status in ['ACTIVE', 'RESOLUTION_PENDING'])
             || (resource.data.status == 'RESOLUTION_PENDING' && request.resource.data.status in ['RESOLUTION_PENDING', 'ACTIVE'])
-            || (resource.data.status == 'RESOLVED' && request.resource.data.status in ['RESOLVED', 'ACTIVE'])
+            || (resource.data.status == 'RESPONDED' && request.resource.data.status == 'RESPONDED')
+            || (resource.data.status == 'RESOLVED' && request.resource.data.status == 'RESOLVED')
           )
           && (
             request.resource.data.status != 'RESOLUTION_PENDING'
@@ -42,6 +73,7 @@ service cloud.firestore {
 
       function canConfirmResolutionAsSecondDispatcher() {
         return resource.data.status == 'RESOLUTION_PENDING'
+          && isResponderOrAdmin()
           && request.resource.data.status in ['RESOLUTION_PENDING', 'RESOLVED']
           && request.auth.uid != resource.data.reporterId
           && reporterIdentityUnchanged()
@@ -55,6 +87,32 @@ service cloud.firestore {
           && !(request.auth.uid in resource.data.resolution.confirmedBy)
           && request.resource.data.resolution.confirmedBy.size() == resource.data.resolution.confirmedBy.size() + 1
           && (request.resource.data.status != 'RESOLVED' || request.resource.data.resolution.confirmedBy.size() >= 2);
+      }
+
+      function canResponderMarkResponded() {
+        return resource.data.status == 'ACTIVE'
+          && request.resource.data.status == 'RESPONDED'
+          && isResponderOrAdmin()
+          && reporterIdentityUnchanged()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'response', 'updatedAt'])
+          && request.resource.data.response is map
+          && request.resource.data.response.respondedBy == request.auth.uid
+          && request.resource.data.response.note is string
+          && request.resource.data.response.note.size() >= 8;
+      }
+
+      function canResponderResolveAfterResponse() {
+        return resource.data.status == 'RESPONDED'
+          && request.resource.data.status == 'RESOLVED'
+          && isResponderOrAdmin()
+          && reporterIdentityUnchanged()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolution', 'updatedAt'])
+          && resource.data.response is map
+          && request.resource.data.resolution is map
+          && request.resource.data.resolution.note is string
+          && request.resource.data.resolution.note.size() >= 12
+          && request.resource.data.resolution.finalizedBy == request.auth.uid
+          && (isAdmin() || resource.data.response.respondedBy == request.auth.uid);
       }
 
       allow read: if isSignedIn();
@@ -72,9 +130,14 @@ service cloud.firestore {
         && request.resource.data.responseCount is int;
 
       allow update: if isSignedIn()
-        && (ownerCanUpdateAccident() || canConfirmResolutionAsSecondDispatcher());
+        && (
+          ownerCanUpdateAccident()
+          || canConfirmResolutionAsSecondDispatcher()
+          || canResponderMarkResponded()
+          || canResponderResolveAfterResponse()
+        );
 
-      allow delete: if isSignedIn() && resource.data.reporterId == request.auth.uid;
+      allow delete: if isSignedIn() && (resource.data.reporterId == request.auth.uid || isAdmin());
     }
   }
 }
